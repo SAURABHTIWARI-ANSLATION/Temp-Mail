@@ -10,6 +10,7 @@ Add these to Railway, Render, Fly.io app secrets, VPS `.env`, or Docker runtime 
 | --- | --- | --- | --- |
 | `NEXT_PUBLIC_MAIL_DOMAIN` | Yes | Web app + API | Your receiving mail domain, for example `mail.yourdomain.com`. |
 | `INBOUND_API_KEY` | Yes | Web app API + SMTP receiver | Long random value. SMTP receiver sends it as `Authorization: Bearer <value>`. |
+| `OPS_API_KEY` | Yes | Web app metrics endpoint | Different long random value. Use it as `Authorization: Bearer <value>` for `/api/metrics`. |
 | `UPSTASH_REDIS_REST_URL` | Yes | Web app store | Upstash Redis REST URL. |
 | `UPSTASH_REDIS_REST_TOKEN` | Yes | Web app store | Upstash Redis REST token. |
 | `ALLOWED_ORIGINS` | Yes | Web app security | Comma-separated origins allowed to embed/call app, for example `https://yourdomain.com,https://app.yourdomain.com`. |

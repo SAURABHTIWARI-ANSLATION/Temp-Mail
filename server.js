@@ -4,6 +4,7 @@ import { WebSocketServer } from 'ws'
 import { config, requireProductionSecrets } from './lib/config.js'
 import { bearerToken, getClientIp, readJson, sendJson } from './lib/http-utils.js'
 import { logger } from './lib/logger.js'
+import { getMetrics, incrementMetric } from './lib/metrics.js'
 import {
   createMailbox,
   deleteMailbox,
@@ -51,6 +52,7 @@ function securityHeaders() {
 function send(socket, payload) {
   if (socket.readyState === socket.OPEN) {
     socket.send(JSON.stringify(payload))
+    incrementMetric('websocketMessagesSent')
   }
 }
 
@@ -72,6 +74,14 @@ function authorizeInbound(req, payload) {
   if (token === config.inboundApiKey) return true
 
   return config.demoInboundEnabled && payload?.demo === true
+}
+
+function authorizeOps(req) {
+  if (!config.opsApiKey) {
+    return !config.isProduction
+  }
+
+  return bearerToken(req) === config.opsApiKey
 }
 
 function mailboxToken(req, url) {
@@ -105,6 +115,25 @@ async function handleApi(req, res) {
     return true
   }
 
+  if (req.method === 'GET' && url.pathname === '/api/metrics') {
+    if (!authorizeOps(req)) {
+      sendJson(res, 401, { error: 'Unauthorized metrics request' }, securityHeaders())
+      return true
+    }
+
+    sendJson(
+      res,
+      200,
+      getMetrics({
+        storeMode,
+        activeWebSockets: wss.clients.size,
+        trackedMailboxes: clients.size,
+      }),
+      securityHeaders(),
+    )
+    return true
+  }
+
   if (req.method === 'GET' && url.pathname === '/api/generate') {
     const limited = rateLimit(
       `generate:${getClientIp(req)}`,
@@ -115,7 +144,9 @@ async function handleApi(req, res) {
       return true
     }
 
-    sendJson(res, 200, { mailbox: await createMailbox() }, securityHeaders())
+    const mailbox = await createMailbox()
+    incrementMetric('generatedMailboxes')
+    sendJson(res, 200, { mailbox }, securityHeaders())
     return true
   }
 
@@ -135,6 +166,7 @@ async function handleApi(req, res) {
     }
 
     if (req.method === 'GET') {
+      incrementMetric('inboxReads')
       const mailbox = await getMailbox(id)
       if (!mailbox) {
         sendJson(
@@ -166,6 +198,7 @@ async function handleApi(req, res) {
 
     if (req.method === 'DELETE') {
       await deleteMailbox(id)
+      incrementMetric('mailboxDeletes')
       sendJson(res, 200, { ok: true }, securityHeaders())
       return true
     }
@@ -181,18 +214,21 @@ async function handleApi(req, res) {
     try {
       const payload = await readJson(req, config.maxInboundBodyBytes)
       if (!authorizeInbound(req, payload)) {
+        incrementMetric('inboundRejected')
         sendJson(res, 401, { error: 'Unauthorized inbound webhook' }, securityHeaders())
         return true
       }
 
       const validated = validateInboundPayload(payload, config.mailDomain)
       if (!validated.ok) {
+        incrementMetric('inboundRejected')
         sendJson(res, 400, { error: validated.error }, securityHeaders())
         return true
       }
 
       const message = await receiveMessage(validated.value)
       if (!message) {
+        incrementMetric('inboundRejected')
         sendJson(
           res,
           404,
@@ -202,6 +238,7 @@ async function handleApi(req, res) {
         return true
       }
 
+      incrementMetric('inboundAccepted')
       sendJson(res, 200, { ok: true, message }, securityHeaders())
     } catch (error) {
       sendJson(
@@ -257,6 +294,7 @@ wss.on('connection', async (socket, request) => {
   socket.isAlive = true
   bucket.add(socket)
   clients.set(id, bucket)
+  incrementMetric('websocketConnections')
 
   const mailbox = await getMailbox(id)
   send(socket, {

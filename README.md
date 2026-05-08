@@ -17,6 +17,9 @@ Production-shaped Next.js temporary mail app with a custom Node server for WebSo
 npm run dev
 npm run build
 npm start
+npm run smoke
+npm run check:env
+npm run check:env:smtp
 ```
 
 ## Required Production Env
@@ -32,6 +35,7 @@ Copy `.env.example` into your host settings and set:
 `/api/health` returns `503` in production if important secrets are missing.
 
 Detailed secret placement lives in `docs/SECRETS.md`.
+Deployment DNS steps live in `docs/DNS_AND_DEPLOY.md`.
 
 ## SMTP Receiver
 
