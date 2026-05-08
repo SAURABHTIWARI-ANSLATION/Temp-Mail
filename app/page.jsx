@@ -4,12 +4,18 @@ import {
   Check,
   Clipboard,
   Clock3,
+  Eye,
+  Globe2,
   Inbox,
+  Lock,
   Mail,
   Plus,
+  QrCode,
   RefreshCw,
   Send,
+  ShieldCheck,
   Trash2,
+  Zap,
   Wifi,
   WifiOff,
 } from 'lucide-react'
@@ -277,73 +283,122 @@ export default function Home() {
 
   return (
     <main className={embed ? 'app-shell embed' : 'app-shell'}>
-      <section className="workspace">
-        <aside className="sidebar">
-          <div className="brand">
-            <span className="brand-mark">
-              <Mail size={20} />
-            </span>
-            <div>
-              <p className="eyebrow">Standalone</p>
-              <h1>TempMail</h1>
-            </div>
+      {!embed ? (
+        <>
+          <div className="promo-bar">
+            <span>Launch your own disposable inbox service</span>
+            <strong>White-label ready</strong>
           </div>
+          <header className="site-header">
+            <a className="brand" href="/">
+              <span className="brand-mark">
+                <Mail size={22} />
+              </span>
+              <span>TempMail</span>
+            </a>
+            <nav aria-label="Primary navigation">
+              <a href="#inbox">Inbox</a>
+              <a href="#privacy">Privacy</a>
+              <a href="#embed">Embed</a>
+            </nav>
+            <a className="header-action" href="https://github.com/SAURABHTIWARI-ANSLATION/Temp-Mail">
+              GitHub
+            </a>
+          </header>
+        </>
+      ) : null}
 
-          <div className="address-panel">
-            <div>
-              <p className="eyebrow">Temporary address</p>
+      <section className="hero-section">
+        <div className="hero-copy">
+          <p className="eyebrow">Temporary email address</p>
+          <h1>Your disposable inbox is ready</h1>
+          <p>
+            Use this address anywhere you need quick verification while keeping your real mailbox private.
+          </p>
+        </div>
+
+        <section className="mailbox-card" aria-label="Temporary email address">
+          <div className="mailbox-card-header">
+            <span className="qr-box" aria-label="QR code placeholder">
+              <QrCode size={38} />
+            </span>
+            <div className="address-display">
+              <span>Your Temporary Email Address</span>
               <strong>{mailbox?.address || 'Creating mailbox...'}</strong>
             </div>
-            <div className="address-actions">
-              <button type="button" onClick={copyAddress} disabled={!mailbox} title="Copy address">
-                {copied ? <Check size={18} /> : <Clipboard size={18} />}
-              </button>
-              <button type="button" onClick={generateMailbox} title="New address">
-                <Plus size={18} />
-              </button>
-              <button type="button" onClick={deleteCurrentMailbox} disabled={!mailbox} title="Delete">
-                <Trash2 size={18} />
-              </button>
-            </div>
-          </div>
-
-          <div className="status-grid">
-            <div>
-              <Clock3 size={18} />
-              <span>{timeLeft}</span>
-            </div>
-            <div>
-              {status === 'live' ? <Wifi size={18} /> : <WifiOff size={18} />}
-              <span>{status}</span>
-            </div>
-          </div>
-
-          {DEMO_INBOUND_ENABLED ? (
-            <button className="demo-button" type="button" onClick={sendDemoMessage} disabled={!mailbox}>
-              <Send size={18} />
-              Send demo mail
+            <button className="copy-main" type="button" onClick={copyAddress} disabled={!mailbox}>
+              {copied ? <Check size={20} /> : <Clipboard size={20} />}
+              {copied ? 'Copied' : 'Copy'}
             </button>
-          ) : null}
-        </aside>
+          </div>
 
+          <div className="action-toolbar" aria-label="Mailbox actions">
+            <button type="button" onClick={copyAddress} disabled={!mailbox}>
+              {copied ? <Check size={18} /> : <Clipboard size={18} />}
+              Copy
+            </button>
+            <button type="button" onClick={() => loadInbox(mailbox?.id)} disabled={!mailbox}>
+              <RefreshCw size={18} />
+              Refresh
+            </button>
+            <button type="button" onClick={generateMailbox}>
+              <Plus size={18} />
+              Change
+            </button>
+            <button type="button" onClick={deleteCurrentMailbox} disabled={!mailbox}>
+              <Trash2 size={18} />
+              Delete
+            </button>
+            {DEMO_INBOUND_ENABLED ? (
+              <button type="button" onClick={sendDemoMessage} disabled={!mailbox}>
+                <Send size={18} />
+                Demo
+              </button>
+            ) : null}
+          </div>
+
+          <div className="mailbox-meta">
+            <span>
+              <Clock3 size={18} />
+              {timeLeft}
+            </span>
+            <span>
+              {status === 'live' ? <Wifi size={18} /> : <WifiOff size={18} />}
+              {status}
+            </span>
+            <span>
+              <ShieldCheck size={18} />
+              Protected
+            </span>
+          </div>
+
+          {error ? <p className="notice">{error}</p> : null}
+        </section>
+      </section>
+
+      <section className="workspace" id="inbox">
         <section className="inbox-panel">
           <header className="panel-header">
             <div>
-              <p className="eyebrow">Inbox</p>
-              <h2>{messages.length} messages</h2>
+              <h2>Inbox</h2>
+              <p>{messages.length === 1 ? '1 incoming email' : `${messages.length} incoming emails`}</p>
             </div>
-            <button type="button" onClick={() => loadInbox(mailbox?.id)} disabled={!mailbox} title="Refresh">
+            <button className="icon-button" type="button" onClick={() => loadInbox(mailbox?.id)} disabled={!mailbox} title="Refresh">
               <RefreshCw size={18} />
             </button>
           </header>
 
-          {error ? <p className="notice">{error}</p> : null}
-
-          <div className="inbox-list">
+          <div className="inbox-table">
+            <div className="table-head">
+              <span>Sender</span>
+              <span>Subject</span>
+              <span>View</span>
+            </div>
             {messages.length === 0 ? (
               <div className="empty-state">
                 <Inbox size={34} />
-                <p>Inbox waiting for SMTP mail.</p>
+                <strong>Your inbox is empty</strong>
+                <p>Waiting for incoming emails</p>
               </div>
             ) : (
               messages.map((message) => (
@@ -353,8 +408,9 @@ export default function Home() {
                   type="button"
                   onClick={() => setSelectedId(message.id)}
                 >
-                  <span>{message.subject}</span>
-                  <small>{message.from}</small>
+                  <span>{message.from}</span>
+                  <strong>{message.subject}</strong>
+                  <Eye size={18} />
                 </button>
               ))
             )}
@@ -365,7 +421,6 @@ export default function Home() {
           {selectedMessage ? (
             <>
               <div className="reader-meta">
-                <p className="eyebrow">Message</p>
                 <h2>{selectedMessage.subject}</h2>
                 <span>
                   {selectedMessage.from} · {new Date(selectedMessage.receivedAt).toLocaleString()}
@@ -376,12 +431,32 @@ export default function Home() {
           ) : (
             <div className="empty-reader">
               <Mail size={44} />
-              <h2>Select a message</h2>
-              <p>New mail will open here when it arrives in real time.</p>
+              <h2>No message selected</h2>
+              <p>Incoming mail will open here in real time.</p>
             </div>
           )}
         </section>
       </section>
+
+      {!embed ? (
+        <section className="trust-section" id="privacy">
+          <div>
+            <Lock size={24} />
+            <h2>Private by default</h2>
+            <p>Temporary addresses expire automatically and protect your primary inbox from sign-up noise.</p>
+          </div>
+          <div>
+            <Zap size={24} />
+            <h2>Real-time inbox</h2>
+            <p>Messages arrive over WebSocket without refreshing the page.</p>
+          </div>
+          <div id="embed">
+            <Globe2 size={24} />
+            <h2>Embed ready</h2>
+            <p>Use <code>?embed=1</code> when you want this inbox inside another frontend.</p>
+          </div>
+        </section>
+      ) : null}
     </main>
   )
 }
