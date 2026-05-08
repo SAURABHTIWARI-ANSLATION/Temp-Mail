@@ -37,6 +37,7 @@ Copy `.env.example` into your host settings and set:
 Detailed secret placement lives in `docs/SECRETS.md`.
 Deployment DNS steps live in `docs/DNS_AND_DEPLOY.md`.
 Security notes live in `docs/SECURITY.md`.
+Complete setup documentation lives in `docs/SETUP_COMPLETE.md`.
 
 ## SMTP Receiver
 
