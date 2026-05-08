@@ -21,6 +21,14 @@ if (denied.status !== 403) {
   throw new Error(`Expected inbox without token to return 403, got ${denied.status}`)
 }
 
+const nonJsonInbound = await fetch(`${baseUrl}/api/inbound`, {
+  method: 'POST',
+  body: 'not-json',
+})
+if (nonJsonInbound.status !== 415) {
+  throw new Error(`Expected non-JSON inbound to return 415, got ${nonJsonInbound.status}`)
+}
+
 await readJson(
   await fetch(`${baseUrl}/api/emails/${encodeURIComponent(mailbox.id)}`, {
     headers: { 'x-mailbox-token': mailbox.token },
@@ -30,8 +38,27 @@ await readJson(
 const protocol = baseUrl.startsWith('https') ? 'wss' : 'ws'
 const host = new URL(baseUrl).host
 const { default: WebSocket } = await import('ws')
+
+await new Promise((resolve, reject) => {
+  const deniedSocket = new WebSocket(
+    `${protocol}://${host}/live?id=${encodeURIComponent(mailbox.id)}`,
+    ['tempmail.v1'],
+  )
+  const timer = setTimeout(() => reject(new Error('WebSocket without token did not close')), 2000)
+  deniedSocket.on('close', (code) => {
+    clearTimeout(timer)
+    if (code !== 1008) {
+      reject(new Error(`Expected websocket close 1008, got ${code}`))
+      return
+    }
+    resolve()
+  })
+  deniedSocket.on('error', () => {})
+})
+
 const socket = new WebSocket(
-  `${protocol}://${host}/live?id=${encodeURIComponent(mailbox.id)}&token=${encodeURIComponent(mailbox.token)}`,
+  `${protocol}://${host}/live?id=${encodeURIComponent(mailbox.id)}`,
+  ['tempmail.v1', `mailbox-token.${mailbox.token}`],
 )
 
 await new Promise((resolve, reject) => {

@@ -5,6 +5,7 @@ import { config, requireProductionSecrets } from './lib/config.js'
 import { bearerToken, getClientIp, readJson, sendJson } from './lib/http-utils.js'
 import { logger } from './lib/logger.js'
 import { getMetrics, incrementMetric } from './lib/metrics.js'
+import { isJsonRequest, safeEqual } from './lib/security.js'
 import {
   createMailbox,
   deleteMailbox,
@@ -41,12 +42,19 @@ function securityHeaders() {
     ? '*'
     : config.allowedOrigins.join(' ')
 
-  return {
+  const headers = {
     'x-content-type-options': 'nosniff',
     'referrer-policy': 'strict-origin-when-cross-origin',
     'permissions-policy': 'camera=(), microphone=(), geolocation=()',
-    'content-security-policy': `frame-ancestors ${frameAncestors}`,
+    'content-security-policy': `frame-ancestors ${frameAncestors}; base-uri 'self'; object-src 'none'; form-action 'self'`,
+    'cross-origin-resource-policy': 'same-origin',
   }
+
+  if (config.isProduction) {
+    headers['strict-transport-security'] = 'max-age=31536000; includeSubDomains; preload'
+  }
+
+  return headers
 }
 
 function send(socket, payload) {
@@ -71,7 +79,7 @@ function authorizeInbound(req, payload) {
   }
 
   const token = bearerToken(req)
-  if (token === config.inboundApiKey) return true
+  if (safeEqual(token, config.inboundApiKey)) return true
 
   return config.demoInboundEnabled && payload?.demo === true
 }
@@ -81,17 +89,39 @@ function authorizeOps(req) {
     return !config.isProduction
   }
 
-  return bearerToken(req) === config.opsApiKey
+  return safeEqual(bearerToken(req), config.opsApiKey)
 }
 
-function mailboxToken(req, url) {
-  return req.headers['x-mailbox-token'] || url.searchParams.get('token') || ''
+function mailboxToken(req) {
+  return req.headers['x-mailbox-token'] || ''
+}
+
+function websocketToken(request) {
+  const protocols = String(request.headers['sec-websocket-protocol'] || '')
+    .split(',')
+    .map((item) => item.trim())
+  const tokenProtocol = protocols.find((protocol) => protocol.startsWith('mailbox-token.'))
+  return tokenProtocol?.replace('mailbox-token.', '') || ''
+}
+
+function methodNotAllowed(res, methods) {
+  sendJson(
+    res,
+    405,
+    { error: 'Method not allowed' },
+    { ...securityHeaders(), allow: methods.join(', ') },
+  )
 }
 
 await app.prepare()
 
 async function handleApi(req, res) {
   const url = new URL(req.url || '/', `http://${req.headers.host}`)
+
+  if (req.method === 'OPTIONS') {
+    sendJson(res, 204, {}, securityHeaders())
+    return true
+  }
 
   if (!isAllowedOrigin(req)) {
     sendJson(res, 403, { error: 'Origin not allowed' }, securityHeaders())
@@ -115,6 +145,11 @@ async function handleApi(req, res) {
     return true
   }
 
+  if (url.pathname === '/api/health') {
+    methodNotAllowed(res, ['GET'])
+    return true
+  }
+
   if (req.method === 'GET' && url.pathname === '/api/metrics') {
     if (!authorizeOps(req)) {
       sendJson(res, 401, { error: 'Unauthorized metrics request' }, securityHeaders())
@@ -134,6 +169,11 @@ async function handleApi(req, res) {
     return true
   }
 
+  if (url.pathname === '/api/metrics') {
+    methodNotAllowed(res, ['GET'])
+    return true
+  }
+
   if (req.method === 'GET' && url.pathname === '/api/generate') {
     const limited = rateLimit(
       `generate:${getClientIp(req)}`,
@@ -150,6 +190,11 @@ async function handleApi(req, res) {
     return true
   }
 
+  if (url.pathname === '/api/generate') {
+    methodNotAllowed(res, ['GET'])
+    return true
+  }
+
   if (url.pathname.startsWith('/api/emails/')) {
     const id = normalizeAddress(
       decodeURIComponent(url.pathname.replace('/api/emails/', '')),
@@ -160,7 +205,7 @@ async function handleApi(req, res) {
       return true
     }
 
-    if (!(await verifyMailboxToken(id, mailboxToken(req, url)))) {
+    if (!(await verifyMailboxToken(id, mailboxToken(req)))) {
       sendJson(res, 403, { error: 'Mailbox token required' }, securityHeaders())
       return true
     }
@@ -202,9 +247,17 @@ async function handleApi(req, res) {
       sendJson(res, 200, { ok: true }, securityHeaders())
       return true
     }
+
+    methodNotAllowed(res, ['GET', 'DELETE'])
+    return true
   }
 
   if (req.method === 'POST' && url.pathname === '/api/inbound') {
+    if (!isJsonRequest(req)) {
+      sendJson(res, 415, { error: 'Content-Type must be application/json' }, securityHeaders())
+      return true
+    }
+
     const limited = rateLimit(`inbound:${getClientIp(req)}`, config.inboundRateLimit)
     if (!limited.allowed) {
       rejectRateLimit(res, limited)
@@ -251,6 +304,11 @@ async function handleApi(req, res) {
     return true
   }
 
+  if (url.pathname === '/api/inbound') {
+    methodNotAllowed(res, ['POST'])
+    return true
+  }
+
   return false
 }
 
@@ -267,13 +325,18 @@ const server = createServer(async (req, res) => {
   }
 })
 
-const wss = new WebSocketServer({ noServer: true })
+const wss = new WebSocketServer({
+  noServer: true,
+  handleProtocols(protocols) {
+    return protocols.has('tempmail.v1') ? 'tempmail.v1' : false
+  },
+})
 const clients = new Map()
 
 wss.on('connection', async (socket, request) => {
   const url = new URL(request.url || '/', `http://${request.headers.host}`)
   const id = normalizeAddress(url.searchParams.get('id'))
-  const token = url.searchParams.get('token') || ''
+  const token = websocketToken(request)
 
   if (!isAllowedOrigin(request)) {
     socket.close(1008, 'Origin not allowed')

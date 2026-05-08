@@ -111,7 +111,8 @@ export default function Home() {
     manualCloseRef.current = false
     const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
     const socket = new WebSocket(
-      `${protocol}://${window.location.host}/live?id=${encodeURIComponent(id)}&token=${encodeURIComponent(token || '')}`,
+      `${protocol}://${window.location.host}/live?id=${encodeURIComponent(id)}`,
+      ['tempmail.v1', `mailbox-token.${token || ''}`],
     )
 
     socketRef.current = socket

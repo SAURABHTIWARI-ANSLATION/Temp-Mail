@@ -50,3 +50,5 @@ Use `.env.example` as a template. For local demo mode, `INBOUND_API_KEY` is opti
 ```bash
 openssl rand -base64 48
 ```
+
+Use different generated values for `INBOUND_API_KEY` and `OPS_API_KEY`.
