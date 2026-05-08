@@ -3,6 +3,7 @@ import next from 'next'
 import { WebSocketServer } from 'ws'
 import { config, requireProductionSecrets } from './lib/config.js'
 import { bearerToken, getClientIp, readJson, sendJson } from './lib/http-utils.js'
+import { logger } from './lib/logger.js'
 import {
   createMailbox,
   deleteMailbox,
@@ -12,6 +13,7 @@ import {
   storeEvents,
   storeHealth,
   storeMode,
+  verifyMailboxToken,
 } from './lib/mail-store.js'
 import { rateLimit } from './lib/rate-limit.js'
 import { isValidAddress, normalizeAddress, validateInboundPayload } from './lib/validation.js'
@@ -72,6 +74,10 @@ function authorizeInbound(req, payload) {
   return config.demoInboundEnabled && payload?.demo === true
 }
 
+function mailboxToken(req, url) {
+  return req.headers['x-mailbox-token'] || url.searchParams.get('token') || ''
+}
+
 await app.prepare()
 
 async function handleApi(req, res) {
@@ -120,6 +126,11 @@ async function handleApi(req, res) {
 
     if (!isValidAddress(id, config.mailDomain)) {
       sendJson(res, 400, { error: 'Invalid mailbox id' }, securityHeaders())
+      return true
+    }
+
+    if (!(await verifyMailboxToken(id, mailboxToken(req, url)))) {
+      sendJson(res, 403, { error: 'Mailbox token required' }, securityHeaders())
       return true
     }
 
@@ -214,7 +225,7 @@ const server = createServer(async (req, res) => {
     }
     handle(req, res)
   } catch (error) {
-    console.error('request_error', error)
+    logger.error('request_error', { error: error.message })
     sendJson(res, 500, { error: 'Internal server error' }, securityHeaders())
   }
 })
@@ -225,6 +236,7 @@ const clients = new Map()
 wss.on('connection', async (socket, request) => {
   const url = new URL(request.url || '/', `http://${request.headers.host}`)
   const id = normalizeAddress(url.searchParams.get('id'))
+  const token = url.searchParams.get('token') || ''
 
   if (!isAllowedOrigin(request)) {
     socket.close(1008, 'Origin not allowed')
@@ -233,6 +245,11 @@ wss.on('connection', async (socket, request) => {
 
   if (!isValidAddress(id, config.mailDomain)) {
     socket.close(1008, 'Valid mailbox id required')
+    return
+  }
+
+  if (!(await verifyMailboxToken(id, token))) {
+    socket.close(1008, 'Mailbox token required')
     return
   }
 
@@ -313,7 +330,11 @@ process.on('SIGTERM', shutdown)
 
 server.listen(config.port, config.hostname, () => {
   if (startupWarnings.length > 0) {
-    console.warn(`Production warnings: missing ${startupWarnings.join(', ')}`)
+    logger.warn('startup_missing_secrets', { missing: startupWarnings })
   }
-  console.log(`TempMail ready on http://localhost:${config.port}`)
+  logger.info('server_ready', {
+    url: `http://localhost:${config.port}`,
+    storeMode,
+    production: config.isProduction,
+  })
 })

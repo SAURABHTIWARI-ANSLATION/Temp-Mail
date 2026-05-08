@@ -1,0 +1,12 @@
+app = "your-tempmail-smtp"
+primary_region = "bom"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[[services]]
+  internal_port = 25
+  protocol = "tcp"
+
+  [[services.ports]]
+    port = 25

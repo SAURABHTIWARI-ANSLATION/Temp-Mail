@@ -77,19 +77,21 @@ export default function Home() {
     [messages, selectedId],
   )
 
-  const loadInbox = useCallback(async (id) => {
+  const loadInbox = useCallback(async (id, token) => {
     if (!id) return
 
     try {
       const response = await fetch(`/api/emails/${encodeURIComponent(id)}`, {
         cache: 'no-store',
+        headers: token ? { 'x-mailbox-token': token } : {},
       })
       const data = await parseJsonResponse(response)
+      const nextMailbox = token ? { ...data.mailbox, token } : data.mailbox
 
-      setMailbox(data.mailbox)
+      setMailbox(nextMailbox)
       setMessages(data.messages)
       setSelectedId((current) => current || data.messages[0]?.id || null)
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(data.mailbox))
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(nextMailbox))
     } catch (requestError) {
       localStorage.removeItem(STORAGE_KEY)
       setMailbox(null)
@@ -100,7 +102,7 @@ export default function Home() {
     }
   }, [])
 
-  const connectLive = useCallback((id) => {
+  const connectLive = useCallback((id, token) => {
     if (!id) return
 
     window.clearTimeout(reconnectTimerRef.current)
@@ -109,7 +111,7 @@ export default function Home() {
     manualCloseRef.current = false
     const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
     const socket = new WebSocket(
-      `${protocol}://${window.location.host}/live?id=${encodeURIComponent(id)}`,
+      `${protocol}://${window.location.host}/live?id=${encodeURIComponent(id)}&token=${encodeURIComponent(token || '')}`,
     )
 
     socketRef.current = socket
@@ -125,7 +127,7 @@ export default function Home() {
       setStatus('offline')
       reconnectAttemptRef.current += 1
       const delay = Math.min(8000, 750 * reconnectAttemptRef.current)
-      reconnectTimerRef.current = window.setTimeout(() => connectLive(id), delay)
+      reconnectTimerRef.current = window.setTimeout(() => connectLive(id, token), delay)
     })
     socket.addEventListener('error', () => setStatus('offline'))
     socket.addEventListener('message', (event) => {
@@ -174,7 +176,7 @@ export default function Home() {
       setMessages([])
       setSelectedId(null)
       localStorage.setItem(STORAGE_KEY, JSON.stringify(data.mailbox))
-      connectLive(data.mailbox.id)
+      connectLive(data.mailbox.id, data.mailbox.token)
       postToParent('mailbox', { mailbox: data.mailbox })
     } catch (requestError) {
       setStatus('offline')
@@ -188,6 +190,7 @@ export default function Home() {
     try {
       await fetch(`/api/emails/${encodeURIComponent(mailbox.id)}`, {
         method: 'DELETE',
+        headers: mailbox.token ? { 'x-mailbox-token': mailbox.token } : {},
       })
     } finally {
       manualCloseRef.current = true
@@ -255,8 +258,8 @@ export default function Home() {
       }
 
       setMailbox(parsed)
-      loadInbox(parsed.id)
-      connectLive(parsed.id)
+      loadInbox(parsed.id, parsed.token)
+      connectLive(parsed.id, parsed.token)
     } catch {
       localStorage.removeItem(STORAGE_KEY)
       generateMailbox()
@@ -337,7 +340,7 @@ export default function Home() {
               {copied ? <Check size={18} /> : <Clipboard size={18} />}
               Copy
             </button>
-            <button type="button" onClick={() => loadInbox(mailbox?.id)} disabled={!mailbox}>
+            <button type="button" onClick={() => loadInbox(mailbox?.id, mailbox?.token)} disabled={!mailbox}>
               <RefreshCw size={18} />
               Refresh
             </button>
@@ -383,7 +386,7 @@ export default function Home() {
               <h2>Inbox</h2>
               <p>{messages.length === 1 ? '1 incoming email' : `${messages.length} incoming emails`}</p>
             </div>
-            <button className="icon-button" type="button" onClick={() => loadInbox(mailbox?.id)} disabled={!mailbox} title="Refresh">
+            <button className="icon-button" type="button" onClick={() => loadInbox(mailbox?.id, mailbox?.token)} disabled={!mailbox} title="Refresh">
               <RefreshCw size={18} />
             </button>
           </header>

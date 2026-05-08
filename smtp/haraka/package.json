@@ -1,0 +1,14 @@
+{
+  "name": "tempmail-haraka-receiver",
+  "private": true,
+  "version": "0.1.0",
+  "type": "commonjs",
+  "scripts": {
+    "start": "haraka -c .",
+    "check": "node --check plugins/tempmail_inbound.js"
+  },
+  "dependencies": {
+    "Haraka": "^3.1.5",
+    "mailparser": "^3.7.2"
+  }
+}

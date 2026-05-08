@@ -1,0 +1,4 @@
+{
+  "appUrl": "https://temp-mail.yourdomain.com",
+  "apiKey": "same-value-as-INBOUND_API_KEY"
+}
