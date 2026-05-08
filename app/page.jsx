@@ -16,6 +16,10 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 const STORAGE_KEY = 'tempmail.mailbox'
+const EMBED_PARENT_ORIGIN = process.env.NEXT_PUBLIC_EMBED_PARENT_ORIGIN || '*'
+const DEMO_INBOUND_ENABLED =
+  process.env.NEXT_PUBLIC_DEMO_INBOUND_ENABLED === 'true' ||
+  process.env.NODE_ENV !== 'production'
 
 function formatTimeLeft(expiresAt) {
   if (!expiresAt) return '00:00'
@@ -34,7 +38,18 @@ function isEmbedMode() {
 
 function postToParent(type, payload = {}) {
   if (typeof window === 'undefined' || window.parent === window) return
-  window.parent.postMessage({ source: 'tempmail', type, ...payload }, '*')
+  window.parent.postMessage(
+    { source: 'tempmail', type, ...payload },
+    EMBED_PARENT_ORIGIN,
+  )
+}
+
+async function parseJsonResponse(response) {
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok) {
+    throw new Error(data.error || 'Request failed')
+  }
+  return data
 }
 
 export default function Home() {
@@ -47,6 +62,9 @@ export default function Home() {
   const [timeLeft, setTimeLeft] = useState('00:00')
   const [embed, setEmbed] = useState(false)
   const socketRef = useRef(null)
+  const reconnectTimerRef = useRef(null)
+  const reconnectAttemptRef = useRef(0)
+  const manualCloseRef = useRef(false)
 
   const selectedMessage = useMemo(
     () => messages.find((message) => message.id === selectedId) || messages[0],
@@ -56,28 +74,33 @@ export default function Home() {
   const loadInbox = useCallback(async (id) => {
     if (!id) return
 
-    const response = await fetch(`/api/emails/${encodeURIComponent(id)}`, {
-      cache: 'no-store',
-    })
+    try {
+      const response = await fetch(`/api/emails/${encodeURIComponent(id)}`, {
+        cache: 'no-store',
+      })
+      const data = await parseJsonResponse(response)
 
-    if (!response.ok) {
+      setMailbox(data.mailbox)
+      setMessages(data.messages)
+      setSelectedId((current) => current || data.messages[0]?.id || null)
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(data.mailbox))
+    } catch (requestError) {
       localStorage.removeItem(STORAGE_KEY)
       setMailbox(null)
       setMessages([])
-      return
+      setSelectedId(null)
+      setStatus('expired')
+      setError(requestError.message)
     }
-
-    const data = await response.json()
-    setMailbox(data.mailbox)
-    setMessages(data.messages)
-    setSelectedId((current) => current || data.messages[0]?.id || null)
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data.mailbox))
   }, [])
 
   const connectLive = useCallback((id) => {
     if (!id) return
 
+    window.clearTimeout(reconnectTimerRef.current)
+    manualCloseRef.current = true
     socketRef.current?.close()
+    manualCloseRef.current = false
     const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
     const socket = new WebSocket(
       `${protocol}://${window.location.host}/live?id=${encodeURIComponent(id)}`,
@@ -86,11 +109,27 @@ export default function Home() {
     socketRef.current = socket
     setStatus('connecting')
 
-    socket.addEventListener('open', () => setStatus('live'))
-    socket.addEventListener('close', () => setStatus('offline'))
+    socket.addEventListener('open', () => {
+      reconnectAttemptRef.current = 0
+      setStatus('live')
+    })
+    socket.addEventListener('close', () => {
+      if (manualCloseRef.current) return
+
+      setStatus('offline')
+      reconnectAttemptRef.current += 1
+      const delay = Math.min(8000, 750 * reconnectAttemptRef.current)
+      reconnectTimerRef.current = window.setTimeout(() => connectLive(id), delay)
+    })
     socket.addEventListener('error', () => setStatus('offline'))
     socket.addEventListener('message', (event) => {
-      const data = JSON.parse(event.data)
+      let data
+      try {
+        data = JSON.parse(event.data)
+      } catch {
+        setError('Live update parse nahi ho paya.')
+        return
+      }
 
       if (data.type === 'snapshot') {
         if (data.mailbox) setMailbox(data.mailbox)
@@ -107,10 +146,12 @@ export default function Home() {
       }
 
       if (data.type === 'deleted') {
+        manualCloseRef.current = true
         localStorage.removeItem(STORAGE_KEY)
         setMailbox(null)
         setMessages([])
         setSelectedId(null)
+        setStatus('expired')
       }
     })
   }, [])
@@ -119,58 +160,74 @@ export default function Home() {
     setError('')
     setStatus('creating')
 
-    const response = await fetch('/api/generate')
-    const data = await response.json()
+    try {
+      const response = await fetch('/api/generate')
+      const data = await parseJsonResponse(response)
 
-    setMailbox(data.mailbox)
-    setMessages([])
-    setSelectedId(null)
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data.mailbox))
-    connectLive(data.mailbox.id)
-    postToParent('mailbox', { mailbox: data.mailbox })
+      setMailbox(data.mailbox)
+      setMessages([])
+      setSelectedId(null)
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(data.mailbox))
+      connectLive(data.mailbox.id)
+      postToParent('mailbox', { mailbox: data.mailbox })
+    } catch (requestError) {
+      setStatus('offline')
+      setError(requestError.message)
+    }
   }, [connectLive])
 
   const deleteCurrentMailbox = useCallback(async () => {
     if (!mailbox) return
 
-    await fetch(`/api/emails/${encodeURIComponent(mailbox.id)}`, {
-      method: 'DELETE',
-    })
-    localStorage.removeItem(STORAGE_KEY)
-    socketRef.current?.close()
-    setMailbox(null)
-    setMessages([])
-    setSelectedId(null)
-    setStatus('idle')
-    postToParent('deleted', { id: mailbox.id })
+    try {
+      await fetch(`/api/emails/${encodeURIComponent(mailbox.id)}`, {
+        method: 'DELETE',
+      })
+    } finally {
+      manualCloseRef.current = true
+      localStorage.removeItem(STORAGE_KEY)
+      window.clearTimeout(reconnectTimerRef.current)
+      socketRef.current?.close()
+      setMailbox(null)
+      setMessages([])
+      setSelectedId(null)
+      setStatus('idle')
+      postToParent('deleted', { id: mailbox.id })
+    }
   }, [mailbox])
 
   const copyAddress = useCallback(async () => {
     if (!mailbox) return
 
-    await navigator.clipboard.writeText(mailbox.address)
-    setCopied(true)
-    postToParent('copied', { address: mailbox.address })
-    window.setTimeout(() => setCopied(false), 1200)
+    try {
+      await navigator.clipboard.writeText(mailbox.address)
+      setCopied(true)
+      postToParent('copied', { address: mailbox.address })
+      window.setTimeout(() => setCopied(false), 1200)
+    } catch {
+      setError('Clipboard permission blocked hai. Address manually select kar sakte ho.')
+    }
   }, [mailbox])
 
   const sendDemoMessage = useCallback(async () => {
     if (!mailbox) return
 
     setError('')
-    const response = await fetch('/api/inbound', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        to: mailbox.address,
-        from: 'demo@tempmail.dev',
-        subject: `Test mail ${new Date().toLocaleTimeString()}`,
-        text: 'This is a local demo message. In production Haraka will POST the parsed SMTP payload here.',
-      }),
-    })
-
-    if (!response.ok) {
-      setError('Demo mail send nahi ho payi. Mailbox expired ho sakta hai.')
+    try {
+      const response = await fetch('/api/inbound', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          demo: true,
+          to: mailbox.address,
+          from: 'demo@tempmail.dev',
+          subject: `Test mail ${new Date().toLocaleTimeString()}`,
+          text: 'This is a local demo message. In production Haraka will POST the parsed SMTP payload here.',
+        }),
+      })
+      await parseJsonResponse(response)
+    } catch (requestError) {
+      setError(requestError.message)
     }
   }, [mailbox])
 
@@ -183,15 +240,36 @@ export default function Home() {
       return
     }
 
-    const parsed = JSON.parse(saved)
-    setMailbox(parsed)
-    loadInbox(parsed.id)
-    connectLive(parsed.id)
+    try {
+      const parsed = JSON.parse(saved)
+      if (new Date(parsed.expiresAt).getTime() <= Date.now()) {
+        localStorage.removeItem(STORAGE_KEY)
+        generateMailbox()
+        return
+      }
+
+      setMailbox(parsed)
+      loadInbox(parsed.id)
+      connectLive(parsed.id)
+    } catch {
+      localStorage.removeItem(STORAGE_KEY)
+      generateMailbox()
+    }
+
+    return () => {
+      manualCloseRef.current = true
+      window.clearTimeout(reconnectTimerRef.current)
+      socketRef.current?.close()
+    }
   }, [connectLive, generateMailbox, loadInbox])
 
   useEffect(() => {
     const timer = window.setInterval(() => {
-      setTimeLeft(formatTimeLeft(mailbox?.expiresAt))
+      const nextTimeLeft = formatTimeLeft(mailbox?.expiresAt)
+      setTimeLeft(nextTimeLeft)
+      if (mailbox && nextTimeLeft === '00:00') {
+        setStatus('expired')
+      }
     }, 1000)
 
     return () => window.clearInterval(timer)
@@ -240,10 +318,12 @@ export default function Home() {
             </div>
           </div>
 
-          <button className="demo-button" type="button" onClick={sendDemoMessage} disabled={!mailbox}>
-            <Send size={18} />
-            Send demo mail
-          </button>
+          {DEMO_INBOUND_ENABLED ? (
+            <button className="demo-button" type="button" onClick={sendDemoMessage} disabled={!mailbox}>
+              <Send size={18} />
+              Send demo mail
+            </button>
+          ) : null}
         </aside>
 
         <section className="inbox-panel">

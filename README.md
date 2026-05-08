@@ -1,14 +1,14 @@
 # TempMail Standalone
 
-Next.js based temporary mail UI with a custom Node server for WebSocket updates. The app runs standalone today and is kept iframe-ready for a future embedded frontend.
+Production-shaped Next.js temporary mail app with a custom Node server for WebSocket updates. It runs standalone today and stays iframe-ready for future embedding.
 
 ## Flow
 
 1. User opens app.
 2. App generates a temporary email address.
 3. SMTP receiver, such as Haraka on Fly.io, receives real mail.
-4. Receiver posts parsed mail to `POST /api/inbound`.
-5. Message is stored with a TTL and pushed to the browser through `WS /live`.
+4. Receiver posts parsed mail to `POST /api/inbound` with `Authorization: Bearer <INBOUND_API_KEY>`.
+5. Message is stored with TTL and pushed to the browser through `WS /live`.
 6. React UI shows the inbox, copy button, countdown, and message reader.
 
 ## Commands
@@ -19,6 +19,18 @@ npm run build
 npm start
 ```
 
+## Required Production Env
+
+Copy `.env.example` into your host settings and set:
+
+- `NEXT_PUBLIC_MAIL_DOMAIN`
+- `INBOUND_API_KEY`
+- `ALLOWED_ORIGINS`
+- `UPSTASH_REDIS_REST_URL`
+- `UPSTASH_REDIS_REST_TOKEN`
+
+`/api/health` returns `503` in production if important secrets are missing.
+
 ## Local Test
 
 Open `http://localhost:3000`, then use **Send demo mail**. You can also post manually:
@@ -26,7 +38,16 @@ Open `http://localhost:3000`, then use **Send demo mail**. You can also post man
 ```bash
 curl -X POST http://localhost:3000/api/inbound \
   -H "Content-Type: application/json" \
-  -d '{"to":"YOUR_GENERATED_ADDRESS","from":"test@example.com","subject":"Hello","text":"SMTP payload body"}'
+  -d '{"demo":true,"to":"YOUR_GENERATED_ADDRESS","from":"test@example.com","subject":"Hello","text":"SMTP payload body"}'
+```
+
+Production inbound webhook:
+
+```bash
+curl -X POST https://your-domain.com/api/inbound \
+  -H "Authorization: Bearer $INBOUND_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"to":"generated@mail.yourdomain.com","from":"test@example.com","subject":"Hello","text":"SMTP payload body"}'
 ```
 
 ## Embed Mode
@@ -54,6 +75,8 @@ Each event has `{ source: "tempmail", type, ...payload }`.
 
 - Set `NEXT_PUBLIC_MAIL_DOMAIN` to your real mail domain.
 - Set `MAILBOX_TTL_SECONDS` for expiry duration. Default is `600`.
-- Replace the in-memory store in `lib/mail-store.js` with Upstash Redis before deploying multiple instances.
-- Haraka/Fly.io can call `POST /api/inbound` after parsing SMTP mail.
-- Keep the custom `server.js` when deploying to a Node host because it owns the WebSocket upgrade route.
+- Use Upstash Redis in production. Local dev automatically falls back to in-memory storage.
+- Haraka/Fly.io should call `POST /api/inbound` after parsing SMTP mail.
+- Keep the custom `server.js` on a Node host because it owns the WebSocket upgrade route.
+- Vercel serverless is not suitable for this exact WebSocket server. Use Railway, Fly.io, Render, a VPS, or a Docker host.
+- For horizontally scaled WebSocket nodes, add Redis pub/sub or sticky sessions so every node receives inbound mail events.

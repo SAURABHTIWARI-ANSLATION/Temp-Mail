@@ -7,13 +7,17 @@
     "dev": "NODE_ENV=development node server.js",
     "build": "next build",
     "start": "NODE_ENV=production node server.js",
-    "lint": "node --check server.js && node --check lib/mail-store.js"
+    "lint": "node --check server.js && node --check lib/*.js"
   },
   "dependencies": {
+    "@upstash/redis": "^1.38.0",
     "lucide-react": "^1.14.0",
     "next": "^16.2.6",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
     "ws": "^8.20.0"
+  },
+  "overrides": {
+    "postcss": "^8.5.10"
   }
 }

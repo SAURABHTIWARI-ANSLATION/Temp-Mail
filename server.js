@@ -1,6 +1,8 @@
 import { createServer } from 'node:http'
 import next from 'next'
 import { WebSocketServer } from 'ws'
+import { config, requireProductionSecrets } from './lib/config.js'
+import { bearerToken, getClientIp, readJson, sendJson } from './lib/http-utils.js'
 import {
   createMailbox,
   deleteMailbox,
@@ -8,14 +10,41 @@ import {
   listMessages,
   receiveMessage,
   storeEvents,
+  storeHealth,
+  storeMode,
 } from './lib/mail-store.js'
+import { rateLimit } from './lib/rate-limit.js'
+import { isValidAddress, normalizeAddress, validateInboundPayload } from './lib/validation.js'
 
-const dev = process.env.NODE_ENV !== 'production'
-const hostname = process.env.HOSTNAME || '0.0.0.0'
-const port = Number(process.env.PORT || 3000)
-
-const app = next({ dev, hostname, port })
+const app = next({
+  dev: !config.isProduction,
+  hostname: config.hostname,
+  port: config.port,
+})
 const handle = app.getRequestHandler()
+const startupWarnings = requireProductionSecrets()
+
+function isAllowedOrigin(req) {
+  if (config.allowedOrigins.includes('*')) return true
+
+  const origin = req.headers.origin
+  if (!origin) return true
+
+  return config.allowedOrigins.includes(origin)
+}
+
+function securityHeaders() {
+  const frameAncestors = config.allowedOrigins.includes('*')
+    ? '*'
+    : config.allowedOrigins.join(' ')
+
+  return {
+    'x-content-type-options': 'nosniff',
+    'referrer-policy': 'strict-origin-when-cross-origin',
+    'permissions-policy': 'camera=(), microphone=(), geolocation=()',
+    'content-security-policy': `frame-ancestors ${frameAncestors}`,
+  }
+}
 
 function send(socket, payload) {
   if (socket.readyState === socket.OPEN) {
@@ -23,72 +52,153 @@ function send(socket, payload) {
   }
 }
 
-await app.prepare()
-
-function sendJson(res, status, payload) {
-  res.writeHead(status, { 'content-type': 'application/json' })
-  res.end(JSON.stringify(payload))
+function rejectRateLimit(res, result) {
+  sendJson(
+    res,
+    429,
+    { error: 'Too many requests' },
+    { 'retry-after': String(result.retryAfter || 60) },
+  )
 }
 
-async function readJson(req) {
-  const chunks = []
-  for await (const chunk of req) {
-    chunks.push(chunk)
+function authorizeInbound(req, payload) {
+  if (!config.inboundApiKey) {
+    return !config.isProduction
   }
 
-  if (chunks.length === 0) return {}
-  return JSON.parse(Buffer.concat(chunks).toString('utf8'))
+  const token = bearerToken(req)
+  if (token === config.inboundApiKey) return true
+
+  return config.demoInboundEnabled && payload?.demo === true
 }
+
+await app.prepare()
 
 async function handleApi(req, res) {
   const url = new URL(req.url || '/', `http://${req.headers.host}`)
 
+  if (!isAllowedOrigin(req)) {
+    sendJson(res, 403, { error: 'Origin not allowed' }, securityHeaders())
+    return true
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/health') {
+    const health = await storeHealth()
+    const ok = startupWarnings.length === 0 && health.ok
+    sendJson(
+      res,
+      ok ? 200 : 503,
+      {
+        ok,
+        store: health,
+        mode: storeMode,
+        warnings: startupWarnings,
+      },
+      securityHeaders(),
+    )
+    return true
+  }
+
   if (req.method === 'GET' && url.pathname === '/api/generate') {
-    sendJson(res, 200, { mailbox: createMailbox() })
+    const limited = rateLimit(
+      `generate:${getClientIp(req)}`,
+      config.generateRateLimit,
+    )
+    if (!limited.allowed) {
+      rejectRateLimit(res, limited)
+      return true
+    }
+
+    sendJson(res, 200, { mailbox: await createMailbox() }, securityHeaders())
     return true
   }
 
   if (url.pathname.startsWith('/api/emails/')) {
-    const id = decodeURIComponent(url.pathname.replace('/api/emails/', ''))
+    const id = normalizeAddress(
+      decodeURIComponent(url.pathname.replace('/api/emails/', '')),
+    )
+
+    if (!isValidAddress(id, config.mailDomain)) {
+      sendJson(res, 400, { error: 'Invalid mailbox id' }, securityHeaders())
+      return true
+    }
 
     if (req.method === 'GET') {
-      const mailbox = getMailbox(id)
+      const mailbox = await getMailbox(id)
       if (!mailbox) {
-        sendJson(res, 404, { error: 'Mailbox not found or expired' })
+        sendJson(
+          res,
+          404,
+          { error: 'Mailbox not found or expired' },
+          securityHeaders(),
+        )
         return true
       }
 
-      sendJson(res, 200, {
-        mailbox: {
-          id: mailbox.id,
-          address: mailbox.address,
-          createdAt: mailbox.createdAt,
-          expiresAt: mailbox.expiresAt,
-          messageCount: mailbox.messageCount,
+      sendJson(
+        res,
+        200,
+        {
+          mailbox: {
+            id: mailbox.id,
+            address: mailbox.address,
+            createdAt: mailbox.createdAt,
+            expiresAt: mailbox.expiresAt,
+            messageCount: mailbox.messageCount,
+          },
+          messages: await listMessages(id),
         },
-        messages: listMessages(id),
-      })
+        securityHeaders(),
+      )
       return true
     }
 
     if (req.method === 'DELETE') {
-      deleteMailbox(id)
-      sendJson(res, 200, { ok: true })
+      await deleteMailbox(id)
+      sendJson(res, 200, { ok: true }, securityHeaders())
       return true
     }
   }
 
   if (req.method === 'POST' && url.pathname === '/api/inbound') {
+    const limited = rateLimit(`inbound:${getClientIp(req)}`, config.inboundRateLimit)
+    if (!limited.allowed) {
+      rejectRateLimit(res, limited)
+      return true
+    }
+
     try {
-      const message = receiveMessage(await readJson(req))
-      if (!message) {
-        sendJson(res, 404, { error: 'Mailbox not found or expired' })
+      const payload = await readJson(req, config.maxInboundBodyBytes)
+      if (!authorizeInbound(req, payload)) {
+        sendJson(res, 401, { error: 'Unauthorized inbound webhook' }, securityHeaders())
         return true
       }
 
-      sendJson(res, 200, { ok: true, message })
-    } catch {
-      sendJson(res, 400, { error: 'Invalid JSON payload' })
+      const validated = validateInboundPayload(payload, config.mailDomain)
+      if (!validated.ok) {
+        sendJson(res, 400, { error: validated.error }, securityHeaders())
+        return true
+      }
+
+      const message = await receiveMessage(validated.value)
+      if (!message) {
+        sendJson(
+          res,
+          404,
+          { error: 'Mailbox not found or expired' },
+          securityHeaders(),
+        )
+        return true
+      }
+
+      sendJson(res, 200, { ok: true, message }, securityHeaders())
+    } catch (error) {
+      sendJson(
+        res,
+        error.statusCode || 500,
+        { error: error.statusCode ? error.message : 'Inbound processing failed' },
+        securityHeaders(),
+      )
     }
     return true
   }
@@ -97,30 +207,49 @@ async function handleApi(req, res) {
 }
 
 const server = createServer(async (req, res) => {
-  if (await handleApi(req, res)) return
-  handle(req, res)
+  try {
+    if (await handleApi(req, res)) return
+    for (const [name, value] of Object.entries(securityHeaders())) {
+      res.setHeader(name, value)
+    }
+    handle(req, res)
+  } catch (error) {
+    console.error('request_error', error)
+    sendJson(res, 500, { error: 'Internal server error' }, securityHeaders())
+  }
 })
+
 const wss = new WebSocketServer({ noServer: true })
 const clients = new Map()
 
-wss.on('connection', (socket, request) => {
+wss.on('connection', async (socket, request) => {
   const url = new URL(request.url || '/', `http://${request.headers.host}`)
-  const id = url.searchParams.get('id')
+  const id = normalizeAddress(url.searchParams.get('id'))
 
-  if (!id) {
-    socket.close(1008, 'Mailbox id required')
+  if (!isAllowedOrigin(request)) {
+    socket.close(1008, 'Origin not allowed')
+    return
+  }
+
+  if (!isValidAddress(id, config.mailDomain)) {
+    socket.close(1008, 'Valid mailbox id required')
     return
   }
 
   const bucket = clients.get(id) || new Set()
+  socket.isAlive = true
   bucket.add(socket)
   clients.set(id, bucket)
 
-  const mailbox = getMailbox(id)
+  const mailbox = await getMailbox(id)
   send(socket, {
     type: 'snapshot',
     mailbox,
     messages: mailbox?.messages || [],
+  })
+
+  socket.on('pong', () => {
+    socket.isAlive = true
   })
 
   socket.on('close', () => {
@@ -143,6 +272,18 @@ server.on('upgrade', (request, socket, head) => {
   })
 })
 
+const heartbeat = setInterval(() => {
+  for (const socket of wss.clients) {
+    if (!socket.isAlive) {
+      socket.terminate()
+      continue
+    }
+
+    socket.isAlive = false
+    socket.ping()
+  }
+}, 30_000)
+
 storeEvents.on('message', ({ mailbox, message }) => {
   const bucket = clients.get(mailbox.id)
   if (!bucket) return
@@ -161,6 +302,18 @@ storeEvents.on('deleted', ({ id }) => {
   }
 })
 
-server.listen(port, hostname, () => {
-  console.log(`TempMail ready on http://localhost:${port}`)
+function shutdown() {
+  clearInterval(heartbeat)
+  wss.close()
+  server.close(() => process.exit(0))
+}
+
+process.on('SIGINT', shutdown)
+process.on('SIGTERM', shutdown)
+
+server.listen(config.port, config.hostname, () => {
+  if (startupWarnings.length > 0) {
+    console.warn(`Production warnings: missing ${startupWarnings.join(', ')}`)
+  }
+  console.log(`TempMail ready on http://localhost:${config.port}`)
 })
